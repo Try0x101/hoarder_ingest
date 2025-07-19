@@ -4,7 +4,7 @@ import ijson
 import asyncio
 from celery import shared_task
 from app.services import job_manager, stream_processor
-from app.processing import validate_data
+from app.processing import validate_data, orjson_decimal_default
 from app.services.timestamp_calculator import calculate_ingestion_timestamps, format_for_db
 from app.database import save_telemetry_batch
 from datetime import datetime
@@ -27,7 +27,7 @@ async def _process_and_save_data(all_records, headers, client_ip, headers_json, 
     
     db_records = []
     for i, p in enumerate(valid_payloads):
-        db_records.append((valid_device_ids[i], orjson.dumps(p).decode(), headers_json, format_for_db(event_times[i]), request_id))
+        db_records.append((valid_device_ids[i], orjson.dumps(p, default=orjson_decimal_default).decode(), headers_json, format_for_db(event_times[i]), request_id))
     
     if db_records:
         await save_telemetry_batch(db_records)

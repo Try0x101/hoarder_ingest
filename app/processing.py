@@ -2,11 +2,17 @@ import zlib
 import orjson
 from typing import Dict, Any, Tuple
 from fastapi import HTTPException
+import decimal
 
 MAX_PAYLOAD_SIZE = 50 * 1024 * 1024
 MAX_DECOMPRESSED_SIZE = 100 * 1024 * 1024
 MAX_BATCH_SIZE = 1000
 MAX_RESPONSE_RECORDS = 500
+
+def orjson_decimal_default(obj: Any) -> Any:
+    if isinstance(obj, decimal.Decimal):
+        return float(obj)
+    raise TypeError
 
 async def process_payload(raw_body: bytes) -> Tuple[bool, Dict[str, Any]]:
     if not raw_body:
