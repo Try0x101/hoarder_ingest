@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+aiosqlite
+orjson
+celery
+redis
+aiofiles
+ijson>=3.0
+brotli
+zstandard
+gevent
