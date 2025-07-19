@@ -1,8 +1,9 @@
 import orjson
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
+from urllib.parse import quote_plus
 from app.database import get_historical_telemetry
-from app.utils.formatters import create_pagination_links, format_utc_timestamp, create_device_links
+from app.utils.formatters import format_utc_timestamp, create_device_links
 from .timestamp_calculator import format_display_timestamp
 
 def _check_for_warnings(record: Dict[str, Any]) -> List[str]:
@@ -27,7 +28,7 @@ def _check_for_warnings(record: Dict[str, Any]) -> List[str]:
             
     return warnings
 
-async def process_device_history(device_id: str, limit: int, cursor: Optional[str], base_url: str) -> Dict[str, Any]:
+async def process_device_history(device_id: Optional[str], limit: int, cursor: Optional[str], base_url: str) -> Dict[str, Any]:
     cursor_ts: Optional[str] = None
     cursor_id: Optional[int] = None
     if cursor:
@@ -40,64 +41,84 @@ async def process_device_history(device_id: str, limit: int, cursor: Optional[st
             pass
 
     history_data = await get_historical_telemetry(device_id, limit, cursor_ts, cursor_id)
-    
     history_data.sort(key=lambda r: (r.get('calculated_event_timestamp', '0'), r.get('id', 0)), reverse=True)
+
+    base_params = [f"limit={limit}"]
+    if device_id:
+        base_params.append(f"device_id={device_id}")
+
+    self_params = base_params[:]
+    if cursor:
+        self_params.append(f"cursor={quote_plus(cursor)}")
+    self_url = f"{base_url}/data/history?{'&'.join(self_params)}"
+    
+    request_block = {"self_url": self_url}
+    navigation_block = {"root": f"{base_url}/"}
 
     if not history_data:
         return {
-            "links": create_pagination_links(base_url, device_id, limit),
-            "device_id": device_id,
-            "records_shown": 0,
+            "request": request_block,
+            "navigation": navigation_block,
+            "pagination": {"limit": limit, "records_returned": 0, "next_cursor": None},
             "data": [],
-            "next_cursor": None,
-            "message": f"No data found for device '{device_id}'"
+            "message": f"No data found for device '{device_id}'" if device_id else "No data found for the given query."
         }
 
     processed_data = []
-    next_cursor = None
-    
     for record in history_data:
         try:
             payload = orjson.loads(record["payload"]) if isinstance(record["payload"], str) else record["payload"]
         except orjson.JSONDecodeError:
             payload = {"error": "invalid json stored in db"}
-
-        request_info = None
-        headers_str = record.get("request_headers")
-        if headers_str:
-            try:
-                request_info = orjson.loads(headers_str)
-            except orjson.JSONDecodeError:
-                request_info = {"error": "invalid headers json in db"}
-
+        request_info = orjson.loads(record["request_headers"]) if record.get("request_headers") else None
+        
         processed_record = {
             "id": record["id"],
             "request_id": record.get("request_id"),
+            "device_id": record.get("device_id"),
             "payload": payload,
             "data_timestamp_calculated": format_display_timestamp(record.get("calculated_event_timestamp")),
-            "received_at": format_utc_timestamp(record.get("received_at"))
+            "received_at": format_utc_timestamp(record.get("received_at")),
+            "request_info": request_info,
+            "warnings": _check_for_warnings(record)
         }
-        
-        if request_info:
-            processed_record["request_info"] = request_info
-        
-        warnings = _check_for_warnings(record)
-        if warnings:
-            processed_record["warnings"] = warnings
-            
         processed_data.append(processed_record)
-    
+
+    next_cursor_obj, next_cursor_str = None, None
     if len(history_data) == limit:
         last_record = history_data[-1]
-        next_cursor = f"{last_record['calculated_event_timestamp']},{last_record['id']}"
-    
-    return {
-        "links": create_pagination_links(base_url, device_id, limit, next_cursor),
-        "device_id": device_id,
-        "records_shown": len(processed_data),
-        "pagination": {"limit": limit, "next_cursor": next_cursor},
+        next_cursor_str = f"{last_record['calculated_event_timestamp']},{last_record['id']}"
+        next_cursor_obj = {
+            "raw": next_cursor_str,
+            "timestamp": format_display_timestamp(last_record.get("calculated_event_timestamp")),
+            "id": last_record['id']
+        }
+        navigation_block["next_page"] = f"{base_url}/data/history?{'&'.join(base_params + [f'cursor={quote_plus(next_cursor_str)}'])}"
+        
+    if cursor:
+        navigation_block["first_page"] = f"{base_url}/data/history?{'&'.join(base_params)}"
+
+    pagination_block = {
+        "limit": limit,
+        "records_returned": len(processed_data),
+        "next_cursor": next_cursor_obj,
+        "time_range": {
+            "start": format_display_timestamp(history_data[0].get("calculated_event_timestamp")),
+            "end": format_display_timestamp(history_data[-1].get("calculated_event_timestamp")),
+        }
+    }
+
+    response = {
+        "request": request_block,
+        "navigation": navigation_block,
+        "pagination": pagination_block,
         "data": processed_data
     }
+    
+    if device_id:
+        response["device_id"] = device_id
+        
+    return response
 
 async def get_latest_device_record(device_id: str, base_url: str) -> Dict[str, Any]:
     history_data = await get_historical_telemetry(device_id, 1)

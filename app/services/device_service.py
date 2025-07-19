@@ -13,6 +13,7 @@ async def get_device_list(base_url: str, limit: int = 20) -> List[Dict[str, Any]
             "device_name": device_info["device_name"],
             "client_ip": device_info["client_ip"],
             "last_seen": format_utc_timestamp(device.get("received_at")),
+            "total_records": device.get("total_records", 0),
             "links": create_device_links(base_url, device.get("device_id"))
         })
     return device_list

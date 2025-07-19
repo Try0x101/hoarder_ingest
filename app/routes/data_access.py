@@ -14,15 +14,6 @@ async def get_device_history(
 ):
     try:
         base_url = build_base_url(request)
-        
-        if not device_id:
-            device_list = await get_device_list(base_url, limit=20)
-            return {
-                "links": {"self": f"{base_url}/data/history", "home": f"{base_url}/"},
-                "available_devices": device_list,
-                "message": "Specify device_id parameter to get device history"
-            }
-
         return await process_device_history(device_id, limit, cursor, base_url)
     except Exception as e:
         print(f"History endpoint error: {e}")
