@@ -2,13 +2,43 @@ import os
 import orjson
 import ijson
 import asyncio
+import aiosqlite
 from celery import shared_task
 from app.services import job_manager, stream_processor
 from app.processing import validate_data, orjson_decimal_default
 from app.services.timestamp_calculator import calculate_ingestion_timestamps, format_for_db
-from app.database import save_telemetry_batch
+from app.database import save_telemetry_batch, DB_PATH
 from datetime import datetime
 from app.utils.async_helpers import AsyncGeneratorReader
+
+TARGET_DB_SIZE_MB = 900
+MAX_DB_SIZE_MB = 1000
+
+async def _async_cleanup_db():
+    db_size = os.path.getsize(DB_PATH) / (1024 * 1024)
+    if db_size < MAX_DB_SIZE_MB:
+        print(f"DB size is {db_size:.2f}MB, no cleanup needed.")
+        return
+
+    print(f"DB size is {db_size:.2f}MB, starting cleanup...")
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            while db_size > TARGET_DB_SIZE_MB:
+                cursor = await db.execute("DELETE FROM telemetry WHERE id IN (SELECT id FROM telemetry ORDER BY id ASC LIMIT 1000)")
+                if cursor.rowcount == 0:
+                    break
+                await db.commit()
+                await db.execute("VACUUM")
+                await db.commit()
+                await asyncio.sleep(1)
+                db_size = os.path.getsize(DB_PATH) / (1024 * 1024)
+                print(f"Deleted {cursor.rowcount} records. New size is {db_size:.2f}MB")
+    except Exception as e:
+        print(f"Error during DB cleanup: {e}")
+
+@shared_task(name='tasks.cleanup_db')
+def cleanup_db():
+    asyncio.run(_async_cleanup_db())
 
 async def _process_and_save_data(all_records, headers, client_ip, headers_json, received_at, request_id):
     valid_payloads, valid_device_ids, skipped_count = [], [], 0

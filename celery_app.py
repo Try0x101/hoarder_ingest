@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 
 celery_app = Celery(
     'hoarder_ingest',
@@ -13,4 +14,10 @@ celery_app.conf.update(
     task_serializer='json',
     result_serializer='json',
     accept_content=['json'],
+    beat_schedule={
+        'cleanup-db-every-6-hours': {
+            'task': 'tasks.cleanup_db',
+            'schedule': crontab(minute=0, hour='*/6'),
+        },
+    },
 )
