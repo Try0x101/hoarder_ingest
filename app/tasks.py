@@ -10,17 +10,18 @@ from app.services.timestamp_calculator import calculate_ingestion_timestamps, fo
 from app.database import save_telemetry_batch, DB_PATH
 from datetime import datetime
 from app.utils.async_helpers import AsyncGeneratorReader
+from typing import Dict, List, Tuple, Any, Optional
+from collections import defaultdict
 
 TARGET_DB_SIZE_MB = 900
 MAX_DB_SIZE_MB = 1000
+CHUNK_SIZE = 1000
 
 async def _async_cleanup_db():
     db_size = os.path.getsize(DB_PATH) / (1024 * 1024)
     if db_size < MAX_DB_SIZE_MB:
-        print(f"DB size is {db_size:.2f}MB, no cleanup needed.")
         return
 
-    print(f"DB size is {db_size:.2f}MB, starting cleanup...")
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             while db_size > TARGET_DB_SIZE_MB:
@@ -32,7 +33,6 @@ async def _async_cleanup_db():
                 await db.commit()
                 await asyncio.sleep(1)
                 db_size = os.path.getsize(DB_PATH) / (1024 * 1024)
-                print(f"Deleted {cursor.rowcount} records. New size is {db_size:.2f}MB")
     except Exception as e:
         print(f"Error during DB cleanup: {e}")
 
@@ -40,55 +40,67 @@ async def _async_cleanup_db():
 def cleanup_db():
     asyncio.run(_async_cleanup_db())
 
-async def _process_and_save_data(all_records, headers, client_ip, headers_json, received_at, request_id):
-    valid_payloads, valid_device_ids, skipped_count = [], [], 0
-    for payload in all_records:
+async def _process_and_save_chunk(records, headers, client_ip, headers_json, received_at, request_id, bts_context, start_index):
+    valid_payloads, valid_device_ids = [], []
+    for payload in records:
         is_valid, _, device_id = validate_data(payload, headers, client_ip)
         if is_valid:
             valid_payloads.append(payload)
             valid_device_ids.append(device_id)
-        else:
-            skipped_count += 1
-    
-    if not valid_payloads:
-        return 0, skipped_count
 
-    event_times = calculate_ingestion_timestamps(valid_payloads, received_at)
+    if not valid_payloads:
+        return 0, len(records), bts_context
+
+    event_times, new_bts_context = calculate_ingestion_timestamps(valid_payloads, received_at, bts_context, start_index)
     
-    db_records = []
-    for i, p in enumerate(valid_payloads):
-        db_records.append((valid_device_ids[i], orjson.dumps(p, default=orjson_decimal_default).decode(), headers_json, format_for_db(event_times[i]), request_id))
+    db_records = [
+        (valid_device_ids[i], orjson.dumps(p, default=orjson_decimal_default).decode(), headers_json, format_for_db(event_times[i]), request_id)
+        for i, p in enumerate(valid_payloads)
+    ]
     
     if db_records:
         await save_telemetry_batch(db_records)
         
-    return len(db_records), skipped_count
+    skipped_count = len(records) - len(db_records)
+    return len(db_records), skipped_count, new_bts_context
 
 async def _async_bulk_processor(job_context: dict):
     job_id, temp_file_path, metadata = job_context["job_id"], job_context["temp_file_path"], job_context["metadata"]
-    
+    total_processed, total_skipped, total_records = 0, 0, 0
+    bts_context: Dict[str, List[Tuple[int, datetime]]] = defaultdict(list)
+
     try:
-        await job_manager.set_job_status(job_id, {"status": "PROCESSING", "details": "Reading and parsing file."})
+        await job_manager.set_job_status(job_id, {"status": "PROCESSING", "details": "Starting file stream processing."})
         
-        try:
-            headers, client_ip, request_id = metadata.get("headers", {}), metadata.get("client_ip", "Unknown"), job_id
-            headers_json = orjson.dumps({"client_ip": client_ip, "headers": headers}).decode()
-            received_at = datetime.fromisoformat(metadata["received_at"])
-            
-            stream_generator = await stream_processor.get_decompressed_stream(temp_file_path, headers.get("content-encoding"))
-            async_file_reader = AsyncGeneratorReader(stream_generator)
+        headers, client_ip, request_id = metadata.get("headers", {}), metadata.get("client_ip", "Unknown"), job_id
+        headers_json = orjson.dumps({"client_ip": client_ip, "headers": headers}).decode()
+        received_at = datetime.fromisoformat(metadata["received_at"])
+        
+        stream_generator = await stream_processor.get_decompressed_stream(temp_file_path, headers.get("content-encoding"))
+        async_file_reader = AsyncGeneratorReader(stream_generator)
 
-            all_records = [record async for record in ijson.items_async(async_file_reader, 'item')]
+        chunk = []
+        async for record in ijson.items_async(async_file_reader, 'item'):
+            chunk.append(record)
+            if len(chunk) >= CHUNK_SIZE:
+                processed, skipped, bts_context = await _process_and_save_chunk(chunk, headers, client_ip, headers_json, received_at, request_id, bts_context, total_records)
+                total_processed += processed
+                total_skipped += skipped
+                total_records += len(chunk)
+                await job_manager.set_job_status(job_id, {"status": "PROCESSING", "processed": total_processed, "skipped": total_skipped, "total_records": "streaming..."})
+                chunk = []
+        
+        if chunk:
+            processed, skipped, bts_context = await _process_and_save_chunk(chunk, headers, client_ip, headers_json, received_at, request_id, bts_context, total_records)
+            total_processed += processed
+            total_skipped += skipped
+            total_records += len(chunk)
 
-            await job_manager.set_job_status(job_id, {"status": "PROCESSING", "details": f"Processing {len(all_records)} records."})
-
-            processed, skipped = await _process_and_save_data(all_records, headers, client_ip, headers_json, received_at, request_id)
-
-            await job_manager.set_job_status(job_id, {"status": "COMPLETE", "processed": processed, "skipped": skipped, "total_records": len(all_records)})
-
-        except Exception as e:
-            await job_manager.set_job_status(job_id, {"status": "FAILED", "error": f"{type(e).__name__}: {e}"})
-            raise
+        final_status = {"status": "COMPLETE", "processed": total_processed, "skipped": total_skipped, "total_records": total_records}
+        await job_manager.set_job_status(job_id, final_status)
+    except Exception as e:
+        await job_manager.set_job_status(job_id, {"status": "FAILED", "error": f"{type(e).__name__}: {e}", "processed": total_processed})
+        raise
     finally:
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)

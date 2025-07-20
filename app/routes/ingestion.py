@@ -27,7 +27,8 @@ async def handle_telemetry(request: Request):
     headers_info = {"client_ip": client_ip, "headers": headers}
     headers_json = orjson.dumps(headers_info).decode()
     
-    event_time = calculate_ingestion_timestamps([payload], received_at)[0]
+    event_times, _ = calculate_ingestion_timestamps([payload], received_at)
+    event_time = event_times[0]
     
     await save_telemetry(device_id, orjson.dumps(payload).decode(), headers_json, event_time, request_id)
     return {"status": "ok", "device_id": device_id, "request_id": request_id}
@@ -47,7 +48,7 @@ async def handle_batch(request: Request):
     headers_info = {"client_ip": client_ip, "headers": headers}
     headers_json = orjson.dumps(headers_info).decode()
 
-    event_times = calculate_ingestion_timestamps(payload_list, received_at)
+    event_times, _ = calculate_ingestion_timestamps(payload_list, received_at)
 
     batch_records = []
     for i, payload in enumerate(payload_list):
