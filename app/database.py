@@ -24,7 +24,7 @@ async def _notify_processor(payload: dict):
                 timeout=2.0
             )
     except httpx.RequestError as e:
-        print(f"Failed to notify processor: {e.__class__.__name__}")
+        print(f"Failed to notify processor: {e.__class__.__name__} - {e}")
     except Exception as e:
         print(f"An unexpected error occurred during processor notification: {e}")
 
@@ -68,17 +68,20 @@ async def save_telemetry(device_id: str, payload: str, headers: str, event_time:
             return
 
     if inserted_id:
-        notification_payload = {
-            "records": [{
-                "id": inserted_id,
-                "device_id": device_id,
-                "payload": payload,
-                "request_headers": headers,
-                "calculated_event_timestamp": event_time_str,
-                "request_id": request_id
-            }]
-        }
-        await _notify_processor(notification_payload)
+        try:
+            notification_payload = {
+                "records": [{
+                    "id": inserted_id,
+                    "device_id": device_id,
+                    "payload": orjson.loads(payload),
+                    "request_headers": orjson.loads(headers),
+                    "calculated_event_timestamp": event_time_str,
+                    "request_id": request_id
+                }]
+            }
+            await _notify_processor(notification_payload)
+        except Exception:
+            pass
 
 async def save_telemetry_batch(records: List[Tuple[str, str, str, str, str]]):
     if not records:
@@ -97,49 +100,35 @@ async def save_telemetry_batch(records: List[Tuple[str, str, str, str, str]]):
                 await db.commit()
         except Exception as e:
             print(f"Database batch error: {e}")
-            try:
-                await db.rollback()
-            except:
-                pass
             return
 
-    request_id = records[0][4] if records and len(records[0]) > 4 else None
-    if request_id:
-        try:
-            async with aiosqlite.connect(DB_PATH) as db:
-                db.row_factory = aiosqlite.Row
-                cursor = await db.execute("SELECT id, device_id, payload, request_headers, calculated_event_timestamp, request_id FROM telemetry WHERE request_id = ?", (request_id,))
-                inserted_records = await cursor.fetchall()
-                if inserted_records:
-                    notification_payload = {"records": [dict(row) for row in inserted_records]}
-                    await _notify_processor(notification_payload)
-        except Exception as e:
-            print(f"Failed to fetch records for processor notification: {e}")
+    request_id = records[0][4] if records else None
+    if not request_id: return
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM telemetry WHERE request_id = ?", (request_id,))
+            inserted_records = await cursor.fetchall()
+            if inserted_records:
+                records_for_notification = []
+                for row in inserted_records:
+                    record_dict = dict(row)
+                    try:
+                        record_dict['payload'] = orjson.loads(record_dict['payload'])
+                        record_dict['request_headers'] = orjson.loads(record_dict['request_headers'])
+                    except (orjson.JSONDecodeError, TypeError):
+                        pass
+                    records_for_notification.append(record_dict)
+                await _notify_processor({"records": records_for_notification})
+    except Exception as e:
+        print(f"Failed to fetch records for notification: {e}")
 
 async def get_latest_telemetry(limit: int = 10) -> List[Dict[str, Any]]:
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
-            query = """
-            WITH DeviceCounts AS (
-                SELECT device_id, COUNT(*) as total_records
-                FROM telemetry
-                GROUP BY device_id
-            )
-            SELECT
-                t.device_id,
-                t.received_at,
-                t.payload,
-                t.request_headers,
-                dc.total_records
-            FROM telemetry t
-            JOIN DeviceCounts dc ON t.device_id = dc.device_id
-            WHERE t.id IN (
-                SELECT MAX(id) FROM telemetry GROUP BY device_id
-            )
-            ORDER BY t.received_at DESC
-            LIMIT ?;
-            """
+            query = "SELECT t.*, (SELECT COUNT(*) FROM telemetry WHERE device_id = t.device_id) as total_records FROM telemetry t WHERE t.id IN (SELECT MAX(id) FROM telemetry GROUP BY device_id) ORDER BY t.received_at DESC LIMIT ?"
             cursor = await db.execute(query, (limit,))
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
@@ -153,9 +142,8 @@ async def get_historical_telemetry(device_id: Optional[str], limit: int, cursor_
             db.row_factory = aiosqlite.Row
             capped_limit = min(limit, 500)
             
-            query_parts = ["SELECT id, device_id, payload, received_at, request_headers, calculated_event_timestamp, request_id FROM telemetry"]
+            query_parts = ["SELECT * FROM telemetry"]
             params = []
-
             conditions = []
             if device_id:
                 conditions.append("device_id = ?")
@@ -168,16 +156,12 @@ async def get_historical_telemetry(device_id: Optional[str], limit: int, cursor_
             if conditions:
                 query_parts.append("WHERE " + " AND ".join(conditions))
             
-            query_parts.append("ORDER BY calculated_event_timestamp DESC, id DESC")
-            query_parts.append("LIMIT ?")
+            query_parts.append("ORDER BY calculated_event_timestamp DESC, id DESC LIMIT ?")
             params.append(capped_limit)
             
-            query = " ".join(query_parts)
-            
-            cursor = await db.execute(query, tuple(params))
+            cursor = await db.execute(" ".join(query_parts), tuple(params))
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
     except Exception as e:
-        id_str = f"device {device_id}" if device_id else "global history"
-        print(f"Database history query error for {id_str}: {e}")
+        print(f"Database history query error for {device_id or 'global'}: {e}")
         return []
