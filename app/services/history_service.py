@@ -3,7 +3,7 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 from urllib.parse import quote_plus
 from app.database import get_historical_telemetry
-from app.utils.formatters import format_utc_timestamp, create_device_links
+from app.utils.formatters import format_utc_timestamp
 from .timestamp_calculator import format_display_timestamp
 
 def _check_for_warnings(record: Dict[str, Any]) -> List[str]:
@@ -55,6 +55,9 @@ async def process_device_history(device_id: Optional[str], limit: int, cursor: O
     request_block = {"self_url": self_url}
     navigation_block = {"root": f"{base_url}/"}
 
+    if device_id:
+        navigation_block["latest"] = f"{base_url}/data/latest/{device_id}"
+
     if not history_data:
         return {
             "request": request_block,
@@ -70,7 +73,7 @@ async def process_device_history(device_id: Optional[str], limit: int, cursor: O
             payload = orjson.loads(record["payload"]) if isinstance(record["payload"], str) else record["payload"]
         except orjson.JSONDecodeError:
             payload = {"error": "invalid json stored in db"}
-        request_info = orjson.loads(record["request_headers"]) if record.get("request_headers") else None
+        request_info = orjson.loads(record.get("request_headers")) if record.get("request_headers") else None
         
         processed_record = {
             "id": record["id"],
@@ -140,24 +143,30 @@ async def get_latest_device_record(device_id: str, base_url: str) -> Dict[str, A
         except orjson.JSONDecodeError:
             request_info = {"error": "invalid headers json in db"}
 
-    result = {
-        "links": create_device_links(base_url, device_id),
-        "device_id": device_id,
+    data_payload = {
         "id": record["id"],
         "request_id": record.get("request_id"),
+        "device_id": device_id,
         "payload": payload,
         "data_timestamp_calculated": format_display_timestamp(record.get("calculated_event_timestamp")),
         "received_at": format_utc_timestamp(record.get("received_at"))
     }
     
     if request_info:
-        result["request_info"] = request_info
+        data_payload["request_info"] = request_info
         
     warnings = _check_for_warnings(record)
     if warnings:
-        result["warnings"] = warnings
+        data_payload["warnings"] = warnings
         
-    return result
+    return {
+        "request": {"self_url": f"{base_url}/data/latest/{device_id}"},
+        "navigation": {
+            "root": f"{base_url}/",
+            "history": f"{base_url}/data/history?device_id={device_id}&limit=50"
+        },
+        "data": data_payload
+    }
 
 async def backfill_timestamps():
     import aiosqlite
@@ -199,7 +208,7 @@ async def backfill_timestamps():
                 payload_list = [orjson.loads(rec['payload']) for rec in records]
                 record_ids = [rec['id'] for rec in records]
                 
-                calculated_times = calculate_ingestion_timestamps(payload_list, received_at_dt)
+                calculated_times, _ = calculate_ingestion_timestamps(payload_list, received_at_dt)
                 
                 update_data = [(format_for_db(ts), r_id) for ts, r_id in zip(calculated_times, record_ids)]
                 

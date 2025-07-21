@@ -3,8 +3,8 @@ from celery.schedules import crontab
 
 celery_app = Celery(
     'hoarder_ingest',
-    broker="redis://localhost:6379/0",
-    backend="redis://localhost:6379/1",
+    broker="redis://localhost:6378/0",
+    backend="redis://localhost:6378/1",
     include=['app.tasks']
 )
 

@@ -12,7 +12,7 @@ def _orjson_decimal_default(obj: Any) -> Any:
     raise TypeError
 
 async def set_job_status(job_id: str, status_data: Dict[str, Any]):
-    r = redis.Redis.from_url("redis://localhost:6379/1")
+    r = redis.Redis.from_url("redis://localhost:6378/1")
     key = f"{JOB_STATUS_KEY_PREFIX}{job_id}"
     value = orjson.dumps(status_data, default=_orjson_decimal_default)
     try:
@@ -21,7 +21,7 @@ async def set_job_status(job_id: str, status_data: Dict[str, Any]):
         await r.close()
 
 async def get_job_status(job_id: str) -> Optional[Dict[str, Any]]:
-    r = redis.Redis.from_url("redis://localhost:6379/1")
+    r = redis.Redis.from_url("redis://localhost:6378/1")
     key = f"{JOB_STATUS_KEY_PREFIX}{job_id}"
     try:
         value = await r.get(key)

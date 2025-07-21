@@ -32,3 +32,13 @@ async def get_latest_device_data(device_id: str, request: Request):
     except Exception as e:
         print(f"Latest endpoint error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve device data")
+
+@router.get("/devices")
+async def get_devices_endpoint(request: Request, limit: int = Query(20, ge=1, le=100)):
+    base_url = build_base_url(request)
+    devices = await get_device_list(base_url, limit=limit)
+    return {
+        "request": {"self_url": f"{base_url}/data/devices?limit={limit}"},
+        "navigation": {"root": f"{base_url}/"},
+        "data": devices
+    }

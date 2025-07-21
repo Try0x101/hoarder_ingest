@@ -42,10 +42,10 @@ async def root(request: Request):
     
     endpoint_groups = defaultdict(list)
     for route in request.app.routes:
-        if isinstance(route, APIRoute) and route.tags:
+        if isinstance(route, APIRoute) and route.tags and route.include_in_schema:
             group = route.tags[0]
             endpoint_groups[group].append({
-                "path": route.path,
+                "path": f"{base_url}{route.path}",
                 "name": route.name,
                 "methods": sorted(list(route.methods)),
             })
@@ -115,6 +115,7 @@ async def root(request: Request):
     broker_status = "Configured and active (Redis/Celery for bulk processing)"
 
     return {
+        "request": {"self_url": f"{base_url}/"},
         "server": "Hoarder Ingest Server",
         "status": "online",
         "diagnostics": {
@@ -123,5 +124,5 @@ async def root(request: Request):
             "broker_status": broker_status
         },
         "recently_active_devices": recently_active,
-        "endpoints": dict(sorted(endpoint_groups.items()))
+        "api_endpoints": dict(sorted(endpoint_groups.items()))
     }
