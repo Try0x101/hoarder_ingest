@@ -1,11 +1,12 @@
-from fastapi import APIRouter, Request, HTTPException, Query
-from typing import Optional
+from fastapi import APIRouter, Request, HTTPException, Query, Depends
+from typing import Optional, Dict
 from ..services.data_service import get_device_list, process_device_history, get_latest_device_record
 from ..utils.formatters import build_base_url
+from ..security import get_current_user
 
 router = APIRouter(prefix="/data", tags=["Data Access"])
 
-@router.get("/history")
+@router.get("/history", dependencies=[Depends(get_current_user)])
 async def get_device_history(
     device_id: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=500),
@@ -19,7 +20,7 @@ async def get_device_history(
         print(f"History endpoint error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve device history")
 
-@router.get("/latest/{device_id}")
+@router.get("/latest/{device_id}", dependencies=[Depends(get_current_user)])
 async def get_latest_device_data(device_id: str, request: Request):
     try:
         base_url = build_base_url(request)
@@ -33,7 +34,7 @@ async def get_latest_device_data(device_id: str, request: Request):
         print(f"Latest endpoint error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve device data")
 
-@router.get("/devices")
+@router.get("/devices", dependencies=[Depends(get_current_user)])
 async def get_devices_endpoint(request: Request, limit: int = Query(20, ge=1, le=100)):
     base_url = build_base_url(request)
     devices = await get_device_list(base_url, limit=limit)

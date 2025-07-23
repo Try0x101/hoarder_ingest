@@ -11,3 +11,5 @@ zstandard
 gevent
 httpx
 psutil
+authlib
+itsdangerous
