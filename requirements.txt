@@ -13,3 +13,5 @@ httpx
 psutil
 authlib
 itsdangerous
+authlib
+itsdangerous

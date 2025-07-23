@@ -1,11 +1,12 @@
+# Byte-compiled / optimized / C extension files
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-.Python
+
+# Distribution / packaging
 build/
-develop-eggs/
 dist/
+develop-eggs/
 downloads/
 eggs/
 .eggs/
@@ -21,20 +22,38 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# Virtual Environments
 venv/
 env/
+.env
+.venv
 ENV/
 env.bak/
 venv.bak/
 
+# Database files
 *.db
 *.sqlite
 *.sqlite3
 hoarder_ingest.db
+*.db-journal
+*.db-wal
+*.db-shm
 
-.env
-.venv
-.DS_Store
-.vscode/
+# Celery files
+celerybeat-schedule
+
+# Log files
+*.log*
+
+# IDE and editor directories
 .idea/
-*.log
+.vscode/
+
+# OS-generated files
+.DS_Store
+
+# Obsolete Python files
+*$py.class
+.Python
+celerybeat-schedule

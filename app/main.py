@@ -13,9 +13,13 @@ app = FastAPI(
     title="Hoarder Ingest Server"
 )
 
+secret_key = os.environ.get("SESSION_SECRET_KEY")
+if not secret_key:
+    raise RuntimeError("SESSION_SECRET_KEY environment variable not set. Application cannot start.")
+
 app.add_middleware(
     SessionMiddleware,
-    secret_key=os.environ.get("SESSION_SECRET_KEY", "your-default-secret-key"),
+    secret_key=secret_key,
     https_only=True,
     max_age=86400 * 14
 )

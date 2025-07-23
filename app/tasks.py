@@ -22,18 +22,55 @@ CHUNK_SIZE = 1000
 REDIS_METRICS_URL = "redis://localhost:6378/2"
 
 async def _async_cleanup_db():
-    if not os.path.exists(DB_PATH): return
-    db_size = os.path.getsize(DB_PATH) / (1024 * 1024)
-    if db_size < MAX_DB_SIZE_MB: return
+    if not os.path.exists(DB_PATH):
+        return
+
     try:
+        db_size_bytes = os.path.getsize(DB_PATH)
+        max_db_size_bytes = MAX_DB_SIZE_MB * 1024 * 1024
+
+        if db_size_bytes < max_db_size_bytes:
+            return
+
+        records_deleted_total = 0
         async with aiosqlite.connect(DB_PATH) as db:
-            while db_size > TARGET_DB_SIZE_MB:
-                cursor = await db.execute("DELETE FROM telemetry WHERE id IN (SELECT id FROM telemetry ORDER BY id ASC LIMIT 1000)")
-                if cursor.rowcount == 0: break
+            cursor = await db.execute("SELECT COUNT(*) FROM telemetry")
+            total_records = (await cursor.fetchone())[0]
+
+            if total_records == 0:
+                return
+
+            target_size_bytes = TARGET_DB_SIZE_MB * 1024 * 1024
+            overshoot_bytes = float(db_size_bytes - target_size_bytes)
+
+            if overshoot_bytes <= 0:
+                return
+
+            fraction_to_delete = overshoot_bytes / db_size_bytes
+            records_to_delete = int(total_records * fraction_to_delete)
+
+            if records_to_delete <= 0:
+                return
+
+            while records_deleted_total < records_to_delete:
+                chunk_delete_size = min(1000, records_to_delete - records_deleted_total)
+                if chunk_delete_size <= 0:
+                    break
+                
+                cursor = await db.execute(
+                    "DELETE FROM telemetry WHERE id IN (SELECT id FROM telemetry ORDER BY id ASC LIMIT ?)",
+                    (chunk_delete_size,)
+                )
+                rows_affected = cursor.rowcount
+                if rows_affected == 0:
+                    break
+                
                 await db.commit()
+                records_deleted_total += rows_affected
+            
+            if records_deleted_total > 0:
                 await db.execute("VACUUM")
                 await db.commit()
-                db_size = os.path.getsize(DB_PATH) / (1024 * 1024)
     except Exception as e:
         print(f"Error during DB cleanup: {e}")
 
