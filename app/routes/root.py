@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request
 from fastapi.routing import APIRoute
 from collections import defaultdict
 from typing import Optional
+from urllib.parse import urlparse
 from ..utils.formatters import build_base_url
 from ..utils.device_extractors import extract_device_info
 from ..database import get_latest_telemetry
@@ -29,11 +30,66 @@ async def get_service_status(service_name: str) -> str:
     except Exception:
         return "unknown"
 
+async def _get_webhook_status():
+    webhook_urls_str = os.environ.get("PROCESSOR_WEBHOOK_URL")
+    if not webhook_urls_str:
+        return {"configured": False, "status": "Not configured"}
+
+    targets = []
+    urls = [url.strip() for url in webhook_urls_str.split(',') if url.strip()]
+    for url in urls:
+        try:
+            parsed = urlparse(url)
+            targets.append({"url": url, "hostname": parsed.hostname, "port": parsed.port})
+        except Exception:
+            targets.append({"url": url, "error": "Invalid URL format"})
+    
+    r = None
+    try:
+        r = redis.from_url(REDIS_METRICS_URL, decode_responses=True, socket_timeout=2)
+        stats_raw, last_error_raw = await asyncio.gather(r.lrange("webhook_stats", 0, -1), r.get("webhook_last_error"))
+    except redis.RedisError as e:
+        return {"configured": True, "targets": targets, "statistics_error": f"Redis Error: {e}"}
+    finally:
+        if r: await r.close()
+
+    now = time.time()
+    stats_1h = [orjson.loads(i) for i in stats_raw if now - orjson.loads(i).get('ts', 0) <= 3600]
+    
+    total_sent = len(stats_1h)
+    successes = [s for s in stats_1h if s.get('status') == 'success']
+    failures = total_sent - len(successes)
+    success_rate = (len(successes) / total_sent * 100) if total_sent > 0 else 100.0
+    
+    successful_durations = [s['duration'] for s in successes]
+    avg_latency = (sum(successful_durations) / len(successful_durations) * 1000) if successful_durations else None
+
+    last_error_obj = None
+    if last_error_raw:
+        try:
+            error_data = orjson.loads(last_error_raw)
+            last_error_obj = {
+                "timestamp_utc": datetime.datetime.fromtimestamp(error_data['ts'], tz=datetime.timezone.utc).strftime("%d.%m.%Y %H:%M:%S UTC"),
+                "error": error_data['error']
+            }
+        except (orjson.JSONDecodeError, KeyError, TypeError): pass
+
+    return {
+        "configured": True, "targets": targets,
+        "statistics_last_1_hour": {
+            "notifications_sent": total_sent,
+            "success_rate_perc": round(success_rate, 2),
+            "average_latency_ms": int(round(avg_latency)) if avg_latency is not None else None,
+            "failures": failures,
+            "last_error": last_error_obj
+        }
+    }
+
 async def _get_historical_metrics():
     r = None
     try:
         r = redis.from_url(REDIS_METRICS_URL, decode_responses=True, socket_timeout=2)
-        sys_raw, sync_raw, bulk_raw = await asyncio.gather(r.lrange("system_stats", 0, -1), r.lrange("sync_ingestion_stats", 0, -1), r.lrange("bulk_ingestion_stats", 0, -1))
+        sys_raw, sync_raw = await asyncio.gather(r.lrange("system_stats", 0, -1), r.lrange("sync_ingestion_stats", 0, -1))
         now = time.time()
         
         sys_1h = [orjson.loads(i) for i in sys_raw if now - orjson.loads(i)['ts'] <= 3600]
@@ -42,11 +98,7 @@ async def _get_historical_metrics():
         sync_1h = [orjson.loads(i) for i in sync_raw if now - orjson.loads(i)['ts'] <= 3600]
         sync_1m = [d for d in sync_1h if now - d['ts'] <= 60]
         
-        bulk_1h = [orjson.loads(i) for i in bulk_raw if now - orjson.loads(i)['ts'] <= 3600]
-        bulk_1m = [d for d in bulk_1h if now - d['ts'] <= 60]
-
         sync_count_1m, sync_count_1h = sum(d['count'] for d in sync_1m), sum(d['count'] for d in sync_1h)
-        bulk_count_1m, bulk_count_1h = sum(d['count'] for d in bulk_1m), sum(d['count'] for d in bulk_1h)
 
         return {
             "cpu_usage_average_last_1_minute_perc": round(sum(d['cpu_percent'] for d in sys_1m) / len(sys_1m), 2) if sys_1m else None,
@@ -55,8 +107,6 @@ async def _get_historical_metrics():
             "memory_usage_average_last_1_hour_mb": int(round(sum(d['mem_rss_bytes'] for d in sys_1h) / len(sys_1h) / 1024**2)) if sys_1h else None,
             "telemetry_batch_latency_average_last_1_minute_ms": int(round(sum(d['duration'] for d in sync_1m) / sync_count_1m * 1000)) if sync_count_1m > 0 else None,
             "telemetry_batch_latency_average_last_1_hour_ms": int(round(sum(d['duration'] for d in sync_1h) / sync_count_1h * 1000)) if sync_count_1h > 0 else None,
-            "bulk_worker_throughput_average_last_1_minute_ms_per_record": int(round(sum(d['duration'] for d in bulk_1m) / bulk_count_1m * 1000)) if bulk_count_1m > 0 else None,
-            "bulk_worker_throughput_average_last_1_hour_ms_per_record": int(round(sum(d['duration'] for d in bulk_1h) / bulk_count_1h * 1000)) if bulk_count_1h > 0 else None,
         }
     except (redis.RedisError, orjson.JSONDecodeError, ZeroDivisionError, TypeError, ValueError): return {}
     finally:
@@ -143,7 +193,7 @@ async def root(request: Request):
         
         db_stats = {"total_ingested_records": res['total_records']['c'], "total_unique_devices": res['total_devices']['c'], "oldest_record": format_utc_timestamp(tr['o']), "newest_record": format_utc_timestamp(tr['n']), "database_files": db_files, "total_database_size_in_mb": int(round(total_size / 1024**2)), "database_size_limit_in_mb": int(MAX_DB_SIZE_BYTES / 1024**2), "storage_estimation": storage_est}
 
-        worker, beat, metrics = await asyncio.gather(get_service_status('hoarder-worker.service'), get_service_status('hoarder-beat.service'), _get_historical_metrics())
+        worker, beat, metrics, webhook_status = await asyncio.gather(get_service_status('hoarder-worker.service'), get_service_status('hoarder-beat.service'), _get_historical_metrics(), _get_webhook_status())
         time_since = int((now_utc - datetime.datetime.fromisoformat(tr['n'].replace(" ","T")).replace(tzinfo=datetime.timezone.utc)).total_seconds()) if tr and tr['n'] else -1
         
         checks = [worker == 'active', beat == 'active', time_since >= 0 and time_since < 1800]
@@ -151,7 +201,7 @@ async def root(request: Request):
             "uptime": {"time_since_restart_utc": int(APP_START_TIME), "time_since_restart": format_last_seen_ago(time.time() - APP_START_TIME), "uptime_percentage": round(sum(checks) / len(checks) * 100, 2)},
             "activity": {"time_since_last_record_seconds": time_since if time_since >=0 else None, "records_ingested_last_hour": res['records_last_hour']['c'], "active_devices_last_24h": res['active_devices']['c']},
             "celery_status": {"worker": worker, "beat": beat}, "performance": metrics,
-            "webhook_status": "Configured and active" if os.environ.get("PROCESSOR_WEBHOOK_URL") else "Not configured"
+            "webhook_status": webhook_status
         }
     except aiosqlite.Error as e:
         db_stats, sys_health = {"error": f"DB error: {e}"}, {"error": "Could not query system health."}

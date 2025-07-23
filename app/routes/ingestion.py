@@ -41,7 +41,8 @@ async def handle_telemetry(request: Request):
     headers_json = orjson.dumps({"client_ip": client_ip, "headers": headers}).decode()
     event_times, _ = calculate_ingestion_timestamps([payload], received_at)
     
-    await save_telemetry(device_id, orjson.dumps(payload).decode(), headers_json, event_times[0], request_id, len(raw_body))
+    payload_json = orjson.dumps(payload).decode()
+    await save_telemetry(device_id, payload_json, headers_json, event_times[0], request_id, len(raw_body))
     
     _log_sync_latency(time.monotonic() - start_time, 1)
     return {"status": "ok", "device_id": device_id, "request_id": request_id}
@@ -61,12 +62,15 @@ async def handle_batch(request: Request):
     headers_json = orjson.dumps({"client_ip": client_ip, "headers": headers}).decode()
     event_times, _ = calculate_ingestion_timestamps(payload_list, received_at)
 
+    record_count = len(payload_list)
+    avg_size = len(raw_body) // record_count if record_count > 0 else 0
+
     batch_records = []
     for i, payload in enumerate(payload_list):
         is_valid, _, device_id = validate_data(payload, headers, client_ip)
         if is_valid:
             payload_json = orjson.dumps(payload).decode()
-            batch_records.append((device_id, payload_json, headers_json, format_for_db(event_times[i]), request_id, len(payload_json)))
+            batch_records.append((device_id, payload_json, headers_json, format_for_db(event_times[i]), request_id, avg_size))
     
     if batch_records: await save_telemetry_batch(batch_records)
     

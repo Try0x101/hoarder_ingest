@@ -41,8 +41,7 @@ async def _async_cleanup_db():
 def cleanup_db():
     asyncio.run(_async_cleanup_db())
 
-async def _process_and_save_chunk(records, headers, client_ip, headers_json, received_at, request_id, bts_context, start_index):
-    start_time = time.monotonic()
+async def _process_and_save_chunk(records, headers, client_ip, headers_json, received_at, request_id, bts_context, start_index, avg_record_size):
     valid_payloads, valid_device_ids = [], []
     for payload in records:
         is_valid, _, device_id = validate_data(payload, headers, client_ip)
@@ -54,47 +53,51 @@ async def _process_and_save_chunk(records, headers, client_ip, headers_json, rec
 
     event_times, new_bts_context = calculate_ingestion_timestamps(valid_payloads, received_at, bts_context, start_index)
     
-    db_records = [(valid_device_ids[i], orjson.dumps(p, default=orjson_decimal_default).decode(), headers_json, format_for_db(event_times[i]), request_id, len(orjson.dumps(p))) for i, p in enumerate(valid_payloads)]
+    db_records = [(valid_device_ids[i], orjson.dumps(p, default=orjson_decimal_default).decode(), headers_json, format_for_db(event_times[i]), request_id, avg_record_size) for i, p in enumerate(valid_payloads)]
 
     if db_records: await save_telemetry_batch(db_records)
-    
-    duration, num_records = time.monotonic() - start_time, len(db_records)
-    if num_records > 0:
-        try:
-            r = sync_redis.from_url(REDIS_METRICS_URL)
-            data = orjson.dumps({"ts": time.time(), "duration": duration, "count": num_records})
-            pipe = r.pipeline()
-            pipe.lpush("bulk_ingestion_stats", data)
-            pipe.ltrim("bulk_ingestion_stats", 0, 1999)
-            pipe.execute()
-            r.close()
-        except sync_redis.RedisError: pass
 
     return len(db_records), len(records) - len(db_records), new_bts_context
 
 async def _async_bulk_processor(job_context: dict):
     job_id, temp_file_path, metadata = job_context["job_id"], job_context["temp_file_path"], job_context["metadata"]
-    total_processed, total_skipped, total_records = 0, 0, 0
+    total_processed, total_skipped, total_records_in_file = 0, 0, 0
     bts_context = defaultdict(list)
     try:
+        await job_manager.set_job_status(job_id, {"status": "PROCESSING", "details": "Analyzing file..."})
+        total_file_size = os.path.getsize(temp_file_path)
+
+        count_stream = await stream_processor.get_decompressed_stream(temp_file_path, metadata.get("headers", {}).get("content-encoding"))
+        async for _ in ijson.items_async(AsyncGeneratorReader(count_stream), 'item'):
+            total_records_in_file += 1
+        
+        if total_records_in_file == 0:
+            await job_manager.set_job_status(job_id, {"status": "COMPLETE", "processed": 0, "skipped": 0, "total_records": 0})
+            return
+
+        avg_record_size = total_file_size // total_records_in_file if total_records_in_file > 0 else 0
+        
         await job_manager.set_job_status(job_id, {"status": "PROCESSING", "details": "Starting file stream processing."})
         headers, client_ip, request_id = metadata.get("headers", {}), metadata.get("client_ip", "Unknown"), job_id
         headers_json = orjson.dumps({"client_ip": client_ip, "headers": headers}).decode()
         received_at = datetime.fromisoformat(metadata["received_at"])
-        stream_gen = await stream_processor.get_decompressed_stream(temp_file_path, headers.get("content-encoding"))
-        reader = AsyncGeneratorReader(stream_gen)
+        
+        process_stream = await stream_processor.get_decompressed_stream(temp_file_path, headers.get("content-encoding"))
+        reader = AsyncGeneratorReader(process_stream)
         chunk = []
+        current_record_index = 0
         async for record in ijson.items_async(reader, 'item'):
             chunk.append(record)
             if len(chunk) >= CHUNK_SIZE:
-                processed, skipped, bts_context = await _process_and_save_chunk(chunk, headers, client_ip, headers_json, received_at, request_id, bts_context, total_records)
-                total_processed += processed; total_skipped += skipped; total_records += len(chunk)
+                processed, skipped, bts_context = await _process_and_save_chunk(chunk, headers, client_ip, headers_json, received_at, request_id, bts_context, current_record_index, avg_record_size)
+                total_processed += processed; total_skipped += skipped; current_record_index += len(chunk)
                 await job_manager.set_job_status(job_id, {"status": "PROCESSING", "processed": total_processed, "skipped": total_skipped})
                 chunk = []
         if chunk:
-            processed, skipped, bts_context = await _process_and_save_chunk(chunk, headers, client_ip, headers_json, received_at, request_id, bts_context, total_records)
-            total_processed += processed; total_skipped += skipped; total_records += len(chunk)
-        await job_manager.set_job_status(job_id, {"status": "COMPLETE", "processed": total_processed, "skipped": total_skipped, "total_records": total_records})
+            processed, skipped, bts_context = await _process_and_save_chunk(chunk, headers, client_ip, headers_json, received_at, request_id, bts_context, current_record_index, avg_record_size)
+            total_processed += processed; total_skipped += skipped
+        
+        await job_manager.set_job_status(job_id, {"status": "COMPLETE", "processed": total_processed, "skipped": total_skipped, "total_records": total_records_in_file})
     except Exception as e:
         await job_manager.set_job_status(job_id, {"status": "FAILED", "error": f"{type(e).__name__}: {e}", "processed": total_processed})
         raise

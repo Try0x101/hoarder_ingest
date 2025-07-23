@@ -3,6 +3,8 @@ import os
 import httpx
 import orjson
 import asyncio
+import time
+import redis as sync_redis
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 
@@ -10,6 +12,7 @@ DB_FILE = "hoarder_ingest.db"
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", DB_FILE)
 db_lock = None
 wal_initialized = False
+REDIS_METRICS_URL = "redis://localhost:6378/2"
 
 _http_client: Optional[httpx.AsyncClient] = None
 
@@ -22,20 +25,47 @@ async def get_http_client() -> httpx.AsyncClient:
         )
     return _http_client
 
+def _log_webhook_stats(duration: float, success: bool, error_msg: Optional[str] = None):
+    try:
+        r = sync_redis.from_url(REDIS_METRICS_URL)
+        status = "success" if success else "failure"
+        data = {"ts": time.time(), "duration": duration, "status": status}
+        pipe = r.pipeline()
+        pipe.lpush("webhook_stats", orjson.dumps(data))
+        pipe.ltrim("webhook_stats", 0, 1999)
+        if not success:
+            error_data = {"ts": time.time(), "error": error_msg or "Unknown error"}
+            pipe.set("webhook_last_error", orjson.dumps(error_data))
+        pipe.execute()
+        r.close()
+    except sync_redis.RedisError as e:
+        print(f"Failed to log webhook stats: {e}")
+
 async def _notify_processor_async(payload: dict):
-    webhook_url = os.environ.get("PROCESSOR_WEBHOOK_URL")
-    if not webhook_url:
+    webhook_urls = os.environ.get("PROCESSOR_WEBHOOK_URL")
+    if not webhook_urls:
         return
 
-    try:
-        client = await get_http_client()
-        await client.post(
-            webhook_url,
-            content=orjson.dumps(payload),
-            headers={"Content-Type": "application/json"}
-        )
-    except Exception as e:
-        print(f"Webhook notification failed: {e}")
+    for url in webhook_urls.split(','):
+        url = url.strip()
+        if not url: continue
+        
+        start_time, success, error_msg = time.monotonic(), False, None
+        try:
+            client = await get_http_client()
+            response = await client.post(
+                url,
+                content=orjson.dumps(payload),
+                headers={"Content-Type": "application/json"}
+            )
+            response.raise_for_status()
+            success = True
+        except Exception as e:
+            error_msg = f"{type(e).__name__}: {e}"
+            print(f"Webhook notification to {url} failed: {error_msg}")
+        finally:
+            duration = time.monotonic() - start_time
+            _log_webhook_stats(duration, success, error_msg)
 
 def _notify_processor(payload: dict):
     asyncio.create_task(_notify_processor_async(payload))
