@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Request
 from starlette.responses import RedirectResponse
 from app.security import oauth
+from authlib.integrations.base_client.errors import OAuthError, MismatchingStateError
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -11,7 +12,11 @@ async def login(request: Request):
 
 @router.get('/callback', name='auth_callback')
 async def auth_callback(request: Request):
-    token = await oauth.google.authorize_access_token(request)
+    try:
+        token = await oauth.google.authorize_access_token(request)
+    except (OAuthError, MismatchingStateError):
+        return RedirectResponse(url='/')
+        
     user = token.get('userinfo')
     if user:
         request.session['user'] = dict(user)

@@ -24,4 +24,12 @@ async def get_current_user(request: Request):
     user = request.session.get('user')
     if not user:
         raise HTTPException(status_code=307, detail="Not authenticated", headers={"Location": "/auth/login"})
+
+    allowed_email = os.environ.get("ALLOWED_USER_EMAIL")
+    if not allowed_email:
+        raise HTTPException(status_code=403, detail="Access configured incorrectly: No allowed user specified.")
+
+    if user.get('email') != allowed_email:
+        raise HTTPException(status_code=403, detail="You are not authorized to access this resource.")
+    
     return user
