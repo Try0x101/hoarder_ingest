@@ -9,3 +9,5 @@ ijson>=3.0
 brotli
 zstandard
 gevent
+httpx
+psutil

@@ -19,5 +19,9 @@ celery_app.conf.update(
             'task': 'tasks.cleanup_db',
             'schedule': crontab(minute=0, hour='*/6'),
         },
+        'monitor-system-every-15-seconds': {
+            'task': 'tasks.monitor_system',
+            'schedule': 15.0,
+        },
     },
 )

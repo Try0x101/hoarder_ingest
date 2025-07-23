@@ -30,6 +30,11 @@ def alter_database():
             print("Adding 'request_id' column...")
             cur.execute("ALTER TABLE telemetry ADD COLUMN request_id TEXT")
             print("Column 'request_id' added.")
+        
+        if 'request_size_bytes' not in columns:
+            print("Adding 'request_size_bytes' column...")
+            cur.execute("ALTER TABLE telemetry ADD COLUMN request_size_bytes INTEGER NOT NULL DEFAULT 0")
+            print("Column 'request_size_bytes' added.")
 
         cur.execute("PRAGMA index_list(telemetry)")
         indexes = [row[1] for row in cur.fetchall()]

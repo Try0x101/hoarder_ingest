@@ -60,7 +60,7 @@ async def ensure_wal_mode():
         except Exception as e:
             print(f"WAL mode setup error: {e}")
 
-async def save_telemetry(device_id: str, payload: str, headers: str, event_time: datetime, request_id: str):
+async def save_telemetry(device_id: str, payload: str, headers: str, event_time: datetime, request_id: str, request_size_bytes: int):
     await ensure_wal_mode()
     lock = await get_db_lock()
     event_time_str = event_time.strftime("%Y-%m-%d %H:%M:%S.%f")
@@ -70,8 +70,8 @@ async def save_telemetry(device_id: str, payload: str, headers: str, event_time:
         try:
             async with aiosqlite.connect(DB_PATH, timeout=10) as db:
                 cursor = await db.execute(
-                    "INSERT INTO telemetry (device_id, payload, request_headers, calculated_event_timestamp, request_id) VALUES (?, ?, ?, ?, ?)",
-                    (device_id, payload, headers, event_time_str, request_id)
+                    "INSERT INTO telemetry (device_id, payload, request_headers, calculated_event_timestamp, request_id, request_size_bytes) VALUES (?, ?, ?, ?, ?, ?)",
+                    (device_id, payload, headers, event_time_str, request_id, request_size_bytes)
                 )
                 inserted_id = cursor.lastrowid
                 await db.commit()
@@ -83,19 +83,17 @@ async def save_telemetry(device_id: str, payload: str, headers: str, event_time:
         try:
             notification_payload = {
                 "records": [{
-                    "id": inserted_id,
-                    "device_id": device_id,
-                    "payload": orjson.loads(payload),
-                    "request_headers": orjson.loads(headers),
-                    "calculated_event_timestamp": event_time_str,
-                    "request_id": request_id
+                    "id": inserted_id, "device_id": device_id,
+                    "payload": orjson.loads(payload), "request_headers": orjson.loads(headers),
+                    "calculated_event_timestamp": event_time_str, "request_id": request_id,
+                    "request_size_bytes": request_size_bytes
                 }]
             }
             _notify_processor(notification_payload)
         except Exception:
             pass
 
-async def save_telemetry_batch(records: List[Tuple[str, str, str, str, str]]):
+async def save_telemetry_batch(records: List[Tuple[str, str, str, str, str, int]]):
     if not records:
         return
     
@@ -110,7 +108,7 @@ async def save_telemetry_batch(records: List[Tuple[str, str, str, str, str]]):
                 cursor = await db.cursor()
                 for record in records:
                     await cursor.execute(
-                        "INSERT INTO telemetry (device_id, payload, request_headers, calculated_event_timestamp, request_id) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO telemetry (device_id, payload, request_headers, calculated_event_timestamp, request_id, request_size_bytes) VALUES (?, ?, ?, ?, ?, ?)",
                         record
                     )
                     inserted_ids.append(cursor.lastrowid)
@@ -122,19 +120,14 @@ async def save_telemetry_batch(records: List[Tuple[str, str, str, str, str]]):
     if inserted_ids and records:
         try:
             records_for_notification = []
-            for i, (device_id, payload_json, headers_json, event_time_str, request_id) in enumerate(records):
+            for i, (device_id, payload_json, headers_json, event_time_str, request_id, size) in enumerate(records):
                 try:
-                    record_dict = {
-                        "id": inserted_ids[i],
-                        "device_id": device_id,
-                        "payload": orjson.loads(payload_json),
-                        "request_headers": orjson.loads(headers_json),
-                        "calculated_event_timestamp": event_time_str,
-                        "request_id": request_id
-                    }
-                    records_for_notification.append(record_dict)
-                except (orjson.JSONDecodeError, TypeError):
-                    pass
+                    records_for_notification.append({
+                        "id": inserted_ids[i], "device_id": device_id,
+                        "payload": orjson.loads(payload_json), "request_headers": orjson.loads(headers_json),
+                        "calculated_event_timestamp": event_time_str, "request_id": request_id, "request_size_bytes": size
+                    })
+                except (orjson.JSONDecodeError, TypeError): pass
             
             if records_for_notification:
                 _notify_processor({"records": records_for_notification})
@@ -145,7 +138,16 @@ async def get_latest_telemetry(limit: int = 10) -> List[Dict[str, Any]]:
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
-            query = "SELECT t.*, (SELECT COUNT(*) FROM telemetry WHERE device_id = t.device_id) as total_records FROM telemetry t WHERE t.id IN (SELECT MAX(id) FROM telemetry GROUP BY device_id) ORDER BY t.received_at DESC LIMIT ?"
+            query = """
+                SELECT t.*, dev_stats.total_records, dev_stats.total_bytes, dev_stats.first_seen_ts
+                FROM telemetry t
+                JOIN (
+                    SELECT device_id, MAX(id) as max_id, COUNT(*) as total_records,
+                           SUM(request_size_bytes) as total_bytes, MIN(received_at) as first_seen_ts
+                    FROM telemetry GROUP BY device_id
+                ) dev_stats ON t.id = dev_stats.max_id
+                ORDER BY t.received_at DESC LIMIT ?
+            """
             cursor = await db.execute(query, (limit,))
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
