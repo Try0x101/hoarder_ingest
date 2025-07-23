@@ -41,7 +41,6 @@ async def process_device_history(device_id: Optional[str], limit: int, cursor: O
             pass
 
     history_data = await get_historical_telemetry(device_id, limit, cursor_ts, cursor_id)
-    history_data.sort(key=lambda r: (r.get('calculated_event_timestamp', '0'), r.get('id', 0)), reverse=True)
 
     base_params = [f"limit={limit}"]
     if device_id:

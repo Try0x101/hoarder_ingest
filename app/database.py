@@ -4,7 +4,7 @@ import httpx
 import orjson
 import asyncio
 import time
-import redis as sync_redis
+import redis.asyncio as redis
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 
@@ -25,9 +25,10 @@ async def get_http_client() -> httpx.AsyncClient:
         )
     return _http_client
 
-def _log_webhook_stats(duration: float, success: bool, error_msg: Optional[str] = None):
+async def _log_webhook_stats(duration: float, success: bool, error_msg: Optional[str] = None):
+    r = None
     try:
-        r = sync_redis.from_url(REDIS_METRICS_URL)
+        r = redis.from_url(REDIS_METRICS_URL)
         status = "success" if success else "failure"
         data = {"ts": time.time(), "duration": duration, "status": status}
         pipe = r.pipeline()
@@ -36,10 +37,12 @@ def _log_webhook_stats(duration: float, success: bool, error_msg: Optional[str] 
         if not success:
             error_data = {"ts": time.time(), "error": error_msg or "Unknown error"}
             pipe.set("webhook_last_error", orjson.dumps(error_data))
-        pipe.execute()
-        r.close()
-    except sync_redis.RedisError as e:
+        await pipe.execute()
+    except redis.RedisError as e:
         print(f"Failed to log webhook stats: {e}")
+    finally:
+        if r:
+            await r.close()
 
 async def _notify_processor_async(payload: dict):
     webhook_urls = os.environ.get("PROCESSOR_WEBHOOK_URL")
@@ -65,7 +68,7 @@ async def _notify_processor_async(payload: dict):
             print(f"Webhook notification to {url} failed: {error_msg}")
         finally:
             duration = time.monotonic() - start_time
-            _log_webhook_stats(duration, success, error_msg)
+            await _log_webhook_stats(duration, success, error_msg)
 
 def _notify_processor(payload: dict):
     asyncio.create_task(_notify_processor_async(payload))

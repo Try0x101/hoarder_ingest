@@ -47,7 +47,7 @@ async def _get_webhook_status():
     r = None
     try:
         r = redis.from_url(REDIS_METRICS_URL, decode_responses=True, socket_timeout=2)
-        stats_raw, last_error_raw = await asyncio.gather(r.lrange("webhook_stats", 0, -1), r.get("webhook_last_error"))
+        stats_raw, last_error_raw = await asyncio.gather(r.lrange("webhook_stats", 0, 1999), r.get("webhook_last_error"))
     except redis.RedisError as e:
         return {"configured": True, "targets": targets, "statistics_error": f"Redis Error: {e}"}
     finally:
@@ -89,7 +89,7 @@ async def _get_historical_metrics():
     r = None
     try:
         r = redis.from_url(REDIS_METRICS_URL, decode_responses=True, socket_timeout=2)
-        sys_raw, sync_raw = await asyncio.gather(r.lrange("system_stats", 0, -1), r.lrange("sync_ingestion_stats", 0, -1))
+        sys_raw, sync_raw = await asyncio.gather(r.lrange("system_stats", 0, 399), r.lrange("sync_ingestion_stats", 0, 1999))
         now = time.time()
         
         sys_1h = [orjson.loads(i) for i in sys_raw if now - orjson.loads(i)['ts'] <= 3600]
