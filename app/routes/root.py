@@ -24,7 +24,7 @@ REDIS_METRICS_URL = "redis://localhost:6378/2"
 
 async def get_service_status(service_name: str) -> str:
     try:
-        proc = await asyncio.create_subprocess_shell(f"systemctl is-active {service_name}", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        proc = await asyncio.create_subprocess_shell(f"/bin/systemctl is-active {service_name}", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, _ = await proc.communicate()
         return "active" if stdout.decode().strip() == "active" else "inactive"
     except Exception:
